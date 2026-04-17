@@ -7,7 +7,7 @@ edition = "2021"
 postcard-rpc = { version = "0.12", features = [ "usb-gadget", "tokio", "use-std"] }
 
 tokio = { version = "1.32", features = ["rt", "sync"] }
-usb-gadget = { version = "0.7", features = ["tokio"] }
+usb-gadget = { version = "1.1", features = ["tokio"] }
 static_cell = "2.1.1"
 
 workbook-icd  = { path = "../workbook-icd" }

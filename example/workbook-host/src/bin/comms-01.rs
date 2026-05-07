@@ -5,7 +5,7 @@ use workbook_host_client::client::WorkbookClient;
 
 #[tokio::main]
 pub async fn main() {
-    let client = WorkbookClient::new();
+    let client = WorkbookClient::new().await;
 
     tokio::select! {
         _ = client.wait_closed() => {

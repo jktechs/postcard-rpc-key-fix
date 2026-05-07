@@ -3,8 +3,10 @@
 use std::future::Future;
 
 use nusb::{
-    transfer::{Direction, EndpointType, Queue, RequestBuffer, TransferError},
-    DeviceInfo,
+    descriptors::TransferType,
+    io::{EndpointRead, EndpointWrite},
+    transfer::{Bulk, Direction, In, Out, TransferError},
+    Interface,
 };
 use postcard_schema::Schema;
 use serde::de::DeserializeOwned;
@@ -21,8 +23,6 @@ pub(crate) const MAX_TRANSFER_SIZE: usize = 1024;
 /// How many in-flight requests at once - allows nusb to keep pulling frames
 /// even if we haven't processed them host-side yet.
 pub(crate) const IN_FLIGHT_REQS: usize = 4;
-/// How many consecutive IN errors will we try to recover from before giving up?
-pub(crate) const MAX_STALL_RETRIES: usize = 10;
 
 /// # `nusb` Constructor Methods
 ///
@@ -67,24 +67,30 @@ where
     ///    SomethingBad
     /// }
     ///
-    /// let client = HostClient::<Error>::try_new_raw_nusb(
-    ///     // Find the first device with the serial 12345678
-    ///     |d| d.serial_number() == Some("12345678"),
-    ///     // the URI/path for `Error` messages
-    ///     "error",
-    ///     // Outgoing queue depth in messages
-    ///     8,
-    ///     // Use one-byte sequence numbers
-    ///     VarSeqKind::Seq1,
-    /// ).unwrap();
+    /// #[tokio::main(flavor = "current_thread")]
+    /// async fn main() {
+    ///     let client = HostClient::<Error>::try_new_raw_nusb(
+    ///         // Find the first device with the serial 12345678
+    ///         |d| d.serial_number() == Some("12345678"),
+    ///         // the URI/path for `Error` messages
+    ///         "error",
+    ///         // Outgoing queue depth in messages
+    ///         8,
+    ///         // Use one-byte sequence numbers
+    ///         VarSeqKind::Seq1,
+    ///     )
+    ///     .await
+    ///     .unwrap();
+    /// }
     /// ```
-    pub fn try_new_raw_nusb<F: FnMut(&DeviceInfo) -> bool>(
+    pub async fn try_new_raw_nusb<F: FnMut(&nusb::DeviceInfo) -> bool>(
         func: F,
         err_uri_path: &str,
         outgoing_depth: usize,
         seq_no_kind: VarSeqKind,
     ) -> Result<Self, String> {
         let x = nusb::list_devices()
+            .await
             .map_err(|e| format!("Error listing devices: {e:?}"))?
             .find(func)
             .ok_or_else(|| String::from("Failed to find matching nusb device!"))?;
@@ -100,13 +106,14 @@ where
         #[cfg(target_os = "windows")]
         let interface_id = 0;
 
-        Self::try_from_nusb_and_interface(
+        Self::try_from_nusb_and_interface_id(
             &x,
             interface_id,
             err_uri_path,
             outgoing_depth,
             seq_no_kind,
         )
+        .await
     }
 
     /// Try to create a new link using [`nusb`] for connectivity
@@ -141,22 +148,27 @@ where
     ///    SomethingBad
     /// }
     ///
-    /// let client = HostClient::<Error>::try_new_raw_nusb_with_interface(
-    ///     // Find the first device with the serial 12345678
-    ///     |d| d.serial_number() == Some("12345678"),
-    ///     // Find the "Vendor Specific" interface
-    ///     |i| i.class() == 0xFF,
-    ///     // the URI/path for `Error` messages
-    ///     "error",
-    ///     // Outgoing queue depth in messages
-    ///     8,
-    ///     // Use one-byte sequence numbers
-    ///     VarSeqKind::Seq1,
-    /// ).unwrap();
+    /// #[tokio::main(flavor = "current_thread")]
+    /// async fn main() {
+    ///     let client = HostClient::<Error>::try_new_raw_nusb_with_interface(
+    ///         // Find the first device with the serial 12345678
+    ///         |d| d.serial_number() == Some("12345678"),
+    ///         // Find the "Vendor Specific" interface
+    ///         |i| i.class() == 0xFF,
+    ///         // the URI/path for `Error` messages
+    ///         "error",
+    ///         // Outgoing queue depth in messages
+    ///         8,
+    ///         // Use one-byte sequence numbers
+    ///         VarSeqKind::Seq1,
+    ///     )
+    ///     .await
+    ///     .unwrap();
+    /// }
     /// ```
     #[cfg(not(target_os = "windows"))]
-    pub fn try_new_raw_nusb_with_interface<
-        F1: FnMut(&DeviceInfo) -> bool,
+    pub async fn try_new_raw_nusb_with_interface<
+        F1: FnMut(&nusb::DeviceInfo) -> bool,
         F2: FnMut(&nusb::InterfaceInfo) -> bool,
     >(
         device_func: F1,
@@ -166,6 +178,7 @@ where
         seq_no_kind: VarSeqKind,
     ) -> Result<Self, String> {
         let x = nusb::list_devices()
+            .await
             .map_err(|e| format!("Error listing devices: {e:?}"))?
             .find(device_func)
             .ok_or_else(|| String::from("Failed to find matching nusb device!"))?;
@@ -174,13 +187,14 @@ where
             .position(interface_func)
             .ok_or_else(|| String::from("Failed to find matching interface!!"))?;
 
-        Self::try_from_nusb_and_interface(
+        Self::try_from_nusb_and_interface_id(
             &x,
             interface_id,
             err_uri_path,
             outgoing_depth,
             seq_no_kind,
         )
+        .await
     }
 
     /// Try to create a new link using [`nusb`] for connectivity
@@ -195,6 +209,7 @@ where
     /// ## Example
     ///
     /// ```rust,no_run
+    ///
     /// use postcard_rpc::host_client::HostClient;
     /// use postcard_rpc::header::VarSeqKind;
     /// use serde::{Serialize, Deserialize};
@@ -207,23 +222,28 @@ where
     ///    SomethingBad
     /// }
     ///
-    /// // Assume the first usb device is the one we're interested
-    /// let dev = nusb::list_devices().unwrap().next().unwrap();
-    /// let client = HostClient::<Error>::try_from_nusb_and_interface(
-    ///     // Device to open
-    ///     &dev,
-    ///     // Use the first interface (0)
-    ///     0,
-    ///     // the URI/path for `Error` messages
-    ///     "error",
-    ///     // Outgoing queue depth in messages
-    ///     8,
-    ///     // Use one-byte sequence numbers
-    ///     VarSeqKind::Seq1,
-    /// ).unwrap();
+    /// #[tokio::main(flavor = "current_thread")]
+    /// async fn main() {
+    ///     // Assume the first usb device is the one we're interested
+    ///     let dev = nusb::list_devices().await.unwrap().next().unwrap();
+    ///     let client = HostClient::<Error>::try_from_nusb_and_interface_id(
+    ///         // Device to open
+    ///         &dev,
+    ///         // Use the first interface (0)
+    ///         0,
+    ///         // the URI/path for `Error` messages
+    ///         "error",
+    ///         // Outgoing queue depth in messages
+    ///         8,
+    ///         // Use one-byte sequence numbers
+    ///         VarSeqKind::Seq1,
+    ///     )
+    ///     .await
+    ///     .unwrap();
+    /// }
     /// ```
-    pub fn try_from_nusb_and_interface(
-        dev: &DeviceInfo,
+    pub async fn try_from_nusb_and_interface_id(
+        dev: &nusb::DeviceInfo,
         interface_id: usize,
         err_uri_path: &str,
         outgoing_depth: usize,
@@ -231,18 +251,76 @@ where
     ) -> Result<Self, String> {
         let dev = dev
             .open()
+            .await
             .map_err(|e| format!("Failed opening device: {e:?}"))?;
         let interface = dev
             .claim_interface(interface_id as u8)
+            .await
             .map_err(|e| format!("Failed claiming interface: {e:?}"))?;
 
+        Self::try_from_nusb_interface(interface, err_uri_path, outgoing_depth, seq_no_kind).await
+    }
+
+    /// Try to create a new link using [`nusb`] for connectivity from a claimed nusb interface
+    ///
+    /// `err_uri_path` is the path associated with the `WireErr` message type.
+    ///
+    /// Returns an error if there was an error instantiating the transport.
+    ///
+    /// This constructor is available when the `raw-nusb` feature is enabled.
+    ///
+    /// ## Example
+    ///
+    /// ```rust,no_run
+    ///
+    /// use postcard_rpc::host_client::HostClient;
+    /// use postcard_rpc::header::VarSeqKind;
+    /// use serde::{Serialize, Deserialize};
+    /// use postcard_schema::Schema;
+    ///
+    /// /// A "wire error" type your server can use to respond to any
+    /// /// kind of request, for example if deserializing a request fails
+    /// #[derive(Debug, PartialEq, Schema, Serialize, Deserialize)]
+    /// pub enum Error {
+    ///    SomethingBad
+    /// }
+    ///
+    /// #[tokio::main(flavor = "current_thread")]
+    /// async fn main() {
+    ///     // Assume the first usb device is the one we're interested
+    ///     let info = nusb::list_devices().await.unwrap().next().unwrap();
+    ///     let dev = info.open().await.unwrap();
+    ///
+    ///     // Assume the first device interface is the one we're interested
+    ///     let interface = dev.claim_interface(0).await.unwrap();
+    ///
+    ///     let client = HostClient::<Error>::try_from_nusb_interface(
+    ///         // The claimed interface
+    ///         interface,
+    ///         // the URI/path for `Error` messages
+    ///         "error",
+    ///         // Outgoing queue depth in messages
+    ///         8,
+    ///         // Use one-byte sequence numbers
+    ///         VarSeqKind::Seq1,
+    ///     )
+    ///     .await
+    ///     .unwrap();
+    /// }
+    /// ```
+    pub async fn try_from_nusb_interface(
+        interface: Interface,
+        err_uri_path: &str,
+        outgoing_depth: usize,
+        seq_no_kind: VarSeqKind,
+    ) -> Result<Self, String> {
         let mut mps: Option<usize> = None;
         let mut ep_in: Option<u8> = None;
         let mut ep_out: Option<u8> = None;
         for ias in interface.descriptors() {
             for ep in ias
                 .endpoints()
-                .filter(|e| e.transfer_type() == EndpointType::Bulk)
+                .filter(|e| e.transfer_type() == TransferType::Bulk)
             {
                 match ep.direction() {
                     Direction::Out => {
@@ -269,18 +347,21 @@ where
         let ep_in = ep_in.ok_or("Failed to find IN EP")?;
         tracing::debug!("IN EP: {ep_in}");
 
-        let boq = interface.bulk_out_queue(ep_out);
-        let biq = interface.bulk_in_queue(ep_in);
+        let writer = interface
+            .endpoint::<Bulk, Out>(ep_out)
+            .map_err(|e| format!("Failed to claim OUT endpoint: {e:?}"))?
+            .writer(MAX_TRANSFER_SIZE)
+            .with_num_transfers(IN_FLIGHT_REQS);
+
+        let reader = interface
+            .endpoint::<Bulk, In>(ep_in)
+            .map_err(|e| format!("Failed to claim IN endpoint: {e:?}"))?
+            .reader(MAX_TRANSFER_SIZE)
+            .with_num_transfers(IN_FLIGHT_REQS);
 
         Ok(HostClient::new_with_wire(
-            NusbWireTx {
-                boq,
-                max_packet_size: mps,
-            },
-            NusbWireRx {
-                biq,
-                consecutive_errs: 0,
-            },
+            NusbWireTx { writer },
+            NusbWireRx { reader },
             NusbSpawn,
             seq_no_kind,
             err_uri_path,
@@ -309,24 +390,29 @@ where
     ///    SomethingBad
     /// }
     ///
-    /// let client = HostClient::<Error>::new_raw_nusb(
-    ///     // Find the first device with the serial 12345678
-    ///     |d| d.serial_number() == Some("12345678"),
-    ///     // the URI/path for `Error` messages
-    ///     "error",
-    ///     // Outgoing queue depth in messages
-    ///     8,
-    ///     // Use one-byte sequence numbers
-    ///     VarSeqKind::Seq1,
-    /// );
+    /// #[tokio::main(flavor = "current_thread")]
+    /// async fn main() {
+    ///     let client = HostClient::<Error>::new_raw_nusb(
+    ///         // Find the first device with the serial 12345678
+    ///         |d| d.serial_number() == Some("12345678"),
+    ///         // the URI/path for `Error` messages
+    ///         "error",
+    ///         // Outgoing queue depth in messages
+    ///         8,
+    ///         // Use one-byte sequence numbers
+    ///         VarSeqKind::Seq1,
+    ///     )
+    ///     .await;
+    /// }
     /// ```
-    pub fn new_raw_nusb<F: FnMut(&DeviceInfo) -> bool>(
+    pub async fn new_raw_nusb<F: FnMut(&nusb::DeviceInfo) -> bool>(
         func: F,
         err_uri_path: &str,
         outgoing_depth: usize,
         seq_no_kind: VarSeqKind,
     ) -> Self {
         Self::try_new_raw_nusb(func, err_uri_path, outgoing_depth, seq_no_kind)
+            .await
             .expect("should have found nusb device")
     }
 }
@@ -337,9 +423,11 @@ where
 
 /// NUSB Wire Interface Implementor
 ///
-/// Uses Tokio for spawning tasks
+/// Uses Tokio for spawning tasks on non-wasm targets
+/// Uses spawn_local on wasm
 struct NusbSpawn;
 
+#[cfg(not(target_family = "wasm"))]
 impl WireSpawn for NusbSpawn {
     fn spawn(&mut self, fut: impl Future<Output = ()> + Send + 'static) {
         // Explicitly drop the joinhandle as it impls Future and this makes
@@ -348,165 +436,102 @@ impl WireSpawn for NusbSpawn {
     }
 }
 
-/// NUSB Wire Transmit Interface Implementor
+#[cfg(target_family = "wasm")]
+impl WireSpawn for NusbSpawn {
+    fn spawn(&mut self, fut: impl Future<Output = ()> + 'static) {
+        wasm_bindgen_futures::spawn_local(fut);
+    }
+}
+
+/// NUSB 0.2 Wire Transmit Interface Implementor
 struct NusbWireTx {
-    boq: Queue<Vec<u8>>,
-    max_packet_size: Option<usize>,
+    pub writer: EndpointWrite<Bulk>,
 }
 
 #[derive(thiserror::Error, Debug)]
 enum NusbWireTxError {
     #[error("Transfer Error on Send")]
     Transfer(#[from] TransferError),
+    #[error("I/O Error on Send")]
+    Io(#[from] std::io::Error),
 }
 
 impl WireTx for NusbWireTx {
     type Error = NusbWireTxError;
 
     #[inline]
+    #[cfg(not(target_family = "wasm"))]
     fn send(&mut self, data: Vec<u8>) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.send_inner(data)
+    }
+
+    #[inline]
+    #[cfg(target_family = "wasm")]
+    fn send(&mut self, data: Vec<u8>) -> impl Future<Output = Result<(), Self::Error>> {
         self.send_inner(data)
     }
 }
 
 impl NusbWireTx {
     async fn send_inner(&mut self, data: Vec<u8>) -> Result<(), NusbWireTxError> {
-        let needs_zlp = if let Some(mps) = self.max_packet_size {
-            (data.len() % mps) == 0
-        } else {
-            true
-        };
+        #[cfg(feature = "tokio")]
+        use tokio::io::AsyncWriteExt;
 
-        self.boq.submit(data);
+        #[cfg(all(feature = "futures-lite", not(feature = "tokio")))]
+        use futures_lite::io::AsyncWriteExt;
 
-        // Append ZLP if we are a multiple of max packet
-        if needs_zlp {
-            self.boq.submit(vec![]);
-        }
-
-        let send_res = self.boq.next_complete().await;
-        if let Err(e) = send_res.status {
-            tracing::error!("Output Queue Error: {e:?}");
-            return Err(e.into());
-        }
-
-        if needs_zlp {
-            let send_res = self.boq.next_complete().await;
-            if let Err(e) = send_res.status {
-                tracing::error!("Output Queue Error: {e:?}");
-                return Err(e.into());
-            }
-        }
+        self.writer.write_all(&data).await?;
+        self.writer.flush_end_async().await?;
 
         Ok(())
     }
 }
 
-/// NUSB Wire Receive Interface Implementor
+/// NUSB 0.2 Wire Receive Interface Implementor
 struct NusbWireRx {
-    biq: Queue<RequestBuffer>,
-    consecutive_errs: usize,
+    pub reader: EndpointRead<Bulk>,
 }
 
 #[derive(thiserror::Error, Debug)]
-enum NusbWireRxError {
+pub(crate) enum NusbWireRxError {
     #[error("Transfer Error on Recv")]
     Transfer(#[from] TransferError),
+    #[error("I/O Error on Recv")]
+    IO(#[from] std::io::Error),
+    #[error("Short Packet Error From nusb")]
+    ExpectedShortPacket(#[from] nusb::io::ExpectedShortPacket),
 }
 
 impl WireRx for NusbWireRx {
     type Error = NusbWireRxError;
 
     #[inline]
+    #[cfg(not(target_family = "wasm"))]
     fn receive(&mut self) -> impl Future<Output = Result<Vec<u8>, Self::Error>> + Send {
+        self.recv_inner()
+    }
+
+    #[inline]
+    #[cfg(target_family = "wasm")]
+    fn receive(&mut self) -> impl Future<Output = Result<Vec<u8>, Self::Error>> {
         self.recv_inner()
     }
 }
 
 impl NusbWireRx {
     async fn recv_inner(&mut self) -> Result<Vec<u8>, NusbWireRxError> {
-        loop {
-            // Rehydrate the queue
-            let pending = self.biq.pending();
-            for _ in 0..(IN_FLIGHT_REQS.saturating_sub(pending)) {
-                self.biq.submit(RequestBuffer::new(MAX_TRANSFER_SIZE));
-            }
+        #[cfg(feature = "tokio")]
+        use tokio::io::AsyncReadExt;
 
-            let res = self.biq.next_complete().await;
+        #[cfg(all(feature = "futures-lite", not(feature = "tokio")))]
+        use futures_lite::io::AsyncReadExt;
 
-            if let Err(e) = res.status {
-                self.consecutive_errs += 1;
+        let mut reader = self.reader.until_short_packet();
+        let mut v = Vec::new();
 
-                tracing::error!(
-                    "In Worker error: {e:?}, consecutive: {}",
-                    self.consecutive_errs
-                );
+        reader.read_to_end(&mut v).await?;
+        reader.consume_end()?;
 
-                // Docs only recommend this for Stall, but it seems to work with
-                // UNKNOWN on MacOS as well, todo: look into why!
-                //
-                // Update: This stall condition seems to have been due to an errata in the
-                // STM32F4 USB hardware. See https://github.com/embassy-rs/embassy/pull/2823
-                //
-                // It is now questionable whether we should be doing this stall recovery at all,
-                // as it likely indicates an issue with the connected USB device
-                let recoverable = match e {
-                    TransferError::Stall | TransferError::Unknown => {
-                        self.consecutive_errs <= MAX_STALL_RETRIES
-                    }
-                    TransferError::Cancelled => false,
-                    TransferError::Disconnected => false,
-                    TransferError::Fault => false,
-                };
-
-                let fatal = if recoverable {
-                    tracing::warn!("Attempting stall recovery!");
-
-                    // Stall recovery shouldn't be used with in-flight requests, so
-                    // cancel them all. They'll still pop out of next_complete.
-                    self.biq.cancel_all();
-                    tracing::info!("Cancelled all in-flight requests");
-
-                    // Now we need to join all in flight requests
-                    for _ in 0..(IN_FLIGHT_REQS - 1) {
-                        let res = self.biq.next_complete().await;
-                        tracing::info!("Drain state: {:?}", res.status);
-                    }
-
-                    // Now we can mark the stall as clear
-                    match self.biq.clear_halt() {
-                        Ok(()) => false,
-                        Err(e) => {
-                            tracing::error!("Failed to clear stall: {e:?}, Fatal.");
-                            true
-                        }
-                    }
-                } else {
-                    tracing::error!(
-                        "Giving up after {} errors in a row, final error: {e:?}",
-                        self.consecutive_errs
-                    );
-                    true
-                };
-
-                if fatal {
-                    tracing::error!("Fatal Error, exiting");
-                    // When we close the channel, all pending receivers and subscribers
-                    // will be notified
-                    return Err(e.into());
-                } else {
-                    tracing::info!("Potential recovery, resuming NusbWireRx::recv_inner");
-                    continue;
-                }
-            }
-
-            // If we get a good decode, clear the error flag
-            if self.consecutive_errs != 0 {
-                tracing::info!("Clearing consecutive error counter after good header decode");
-                self.consecutive_errs = 0;
-            }
-
-            return Ok(res.data);
-        }
+        Ok(v)
     }
 }

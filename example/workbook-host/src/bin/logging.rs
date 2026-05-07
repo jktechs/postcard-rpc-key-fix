@@ -4,7 +4,7 @@ use workbook_host_client::client::WorkbookClient;
 #[tokio::main]
 async fn main() {
     println!("Connecting to USB device...");
-    let client = WorkbookClient::new();
+    let client = WorkbookClient::new().await;
     println!("Connected! Pinging 42");
     let ping = client.ping(42).await.unwrap();
     println!("Got: {ping}.");

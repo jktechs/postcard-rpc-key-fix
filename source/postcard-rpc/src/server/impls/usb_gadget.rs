@@ -44,7 +44,7 @@ pub mod dispatch_impl {
 
     pub use crate::server::impls::tokio_shared::tokio_spawn as spawn_fn;
 
-    use usb_gadget::function::custom::Custom;
+    use usb_gadget::function::custom::{Association, Custom, OsExtCompat};
     use usb_gadget::{Gadget, RegGadget};
 
     use crate::server::impls::usb_gadget::{UsbGadgetWireRx, UsbGadgetWireTx};
@@ -80,10 +80,15 @@ pub mod dispatch_impl {
             let (ep_tx, ep_tx_dir) = EndpointDirection::device_to_host();
             let (ep_rx, ep_rx_dir) = EndpointDirection::host_to_device();
 
+            let class = Class::vendor_specific(0x00, 0x00);
+            let iname = "postcard-rpc";
             let (mut custom, handle) = Custom::builder()
                 .with_interface(
-                    Interface::new(Class::vendor_specific(0, 0), "postcard-rpc")
+                    Interface::new(class, iname)
                         .with_os_ext_compat(OsExtCompat::winusb())
+                        // NOTE: IADs are currently broken on upstream usb-gadget - but we want this
+                        //       https://github.com/surban/usb-gadget/issues/25
+                        .with_association(&Association::new(class, iname))
                         .with_endpoint(Endpoint::bulk(ep_tx_dir))
                         .with_endpoint(Endpoint::bulk(ep_rx_dir)),
                 )

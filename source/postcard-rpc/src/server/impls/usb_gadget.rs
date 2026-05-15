@@ -83,6 +83,7 @@ pub mod dispatch_impl {
             let (mut custom, handle) = Custom::builder()
                 .with_interface(
                     Interface::new(Class::vendor_specific(0, 0), "postcard-rpc")
+                        .with_os_ext_compat(OsExtCompat::winusb())
                         .with_endpoint(Endpoint::bulk(ep_tx_dir))
                         .with_endpoint(Endpoint::bulk(ep_rx_dir)),
                 )

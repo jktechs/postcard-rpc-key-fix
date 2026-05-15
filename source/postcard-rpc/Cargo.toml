@@ -38,8 +38,9 @@ postcard-schema = { version = "0.2.2", features = ["derive"] }
 # std-only features
 #
 
-[dependencies.nusb]
-version = "0.1.9"
+# TODO: upstream nusb 0.2 does not build on wasm - there's WIP towards this
+[target.'cfg(not(target_family = "wasm"))'.dependencies.nusb]
+version = "0.2"
 optional = true
 
 [dependencies.tokio-serial]
@@ -110,6 +111,11 @@ optional = true
 version = "0.1.2"
 optional = true
 
+[dependencies.futures-lite]
+version = "2.6"
+optional = true
+default-features = false
+
 
 #
 # no_std-only features
@@ -126,7 +132,7 @@ optional = true
 
 [dependencies.embassy-usb-driver-0_2]
 package = "embassy-usb-driver"
-version = "0.2"
+version = "=0.2.0"
 optional = true
 
 [dependencies.embassy-sync-0_7]
@@ -203,6 +209,7 @@ use-std = [
     "dep:tracing",
     "dep:trait-variant",
     "dep:ssmarshal",
+    "futures-lite/std"
 ]
 
 # Cobs Serial support.
@@ -214,8 +221,8 @@ cobs-serial = ["cobs/use_std", "dep:tokio-serial"]
 # Raw (bulk) USB support
 #
 # Works on: Win, Mac, Linux
-# Does NOT work on: WASM
-raw-nusb = ["dep:nusb", "use-std"]
+# Does NOT work on: WASM (yet)
+raw-nusb = ["dep:nusb", "use-std", "futures-lite"]
 
 # WebUSB support
 #
@@ -277,7 +284,8 @@ usb-gadget = [
     "dep:usb-gadget",
     "dep:bytes",
 ]
-tokio = ["dep:tokio", "usb-gadget/tokio"]
+tokio = ["dep:tokio", "usb-gadget/tokio", "nusb/tokio"]
+futures-lite = ["dep:futures-lite", "nusb/smol"]
 
 # NOTE: This exists because `embassy-usb` indirectly relies on ssmarshal
 # which doesn't work on `std` builds without the `std` feature. This causes

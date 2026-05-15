@@ -44,13 +44,14 @@ impl<T, E> FlattenErr for Result<T, E> {
 // ---
 
 impl WorkbookClient {
-    pub fn new() -> Self {
+    pub async fn new() -> Self {
         let client = HostClient::new_raw_nusb(
             |d| d.product_string() == Some("ov-twin"),
             ERROR_PATH,
             8,
             VarSeqKind::Seq2,
-        );
+        )
+        .await;
         Self { client }
     }
 
@@ -120,11 +121,5 @@ impl WorkbookClient {
             .await?;
 
         Ok(res)
-    }
-}
-
-impl Default for WorkbookClient {
-    fn default() -> Self {
-        Self::new()
     }
 }
